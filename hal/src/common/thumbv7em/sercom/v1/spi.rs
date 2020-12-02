@@ -44,6 +44,22 @@ macro_rules! spi_master {
             }
         }
 
+        $crate::paste::item! {
+            /// A pad mapping configuration for the SERCOM in SPI master mode with
+            /// hardware control of the chip select (aka slave select) pin.
+            ///
+            /// This type can only be constructed using the From implementations
+            /// in this module, which are restricted to valid configurations.
+            ///
+            /// Defines which sercom pad is mapped to which SPI function.
+            pub struct [<$Type HWCSPadout>]<MISO, MOSI, SCK, CS> {
+                _miso: MISO,
+                _mosi: MOSI,
+                _sck: SCK,
+                _cs: CS,
+            }
+        }
+
         /// Define a From instance for a tuple of SercomXPadX instances that
         /// converts them into an SPIMasterXPadout instance.
         ///
@@ -51,6 +67,34 @@ macro_rules! spi_master {
         /// that returns the values used to configure the sercom pads for the
         /// appropriate function in the sercom register file.
         macro_rules! padout {
+            ($dipo_dopo:expr => $pad0:ident, $pad1:ident, $pad2:ident, $pad3:ident) => {
+                $crate::paste::item! {
+                    /// Convert from a tuple of (MISO, MOSI, SCK, CS) to SPIMasterXHWCSPadout
+                    impl<PIN0, PIN1, PIN2, PIN3> From<([<$Sercom $pad0>]<PIN0>, [<$Sercom $pad1>]<PIN1>, [<$Sercom $pad2>]<PIN2>, [<$Sercom $pad3>]<PIN3>)> for [<$Type HWCSPadout>]<[<$Sercom $pad0>]<PIN0>, [<$Sercom $pad1>]<PIN1>, [<$Sercom $pad2>]<PIN2>, [<$Sercom $pad3>]<PIN3>>
+                    where
+                        PIN0: Map<$Sercom, $pad0>,
+                        PIN1: Map<$Sercom, $pad1>,
+                        PIN2: Map<$Sercom, $pad2>,
+                        PIN3: Map<$Sercom, $pad3>,
+                    {
+                        fn from(pads: ([<$Sercom $pad0>]<PIN0>, [<$Sercom $pad1>]<PIN1>, [<$Sercom $pad2>]<PIN2>, [<$Sercom $pad3>]<PIN3>)) -> [<$Type HWCSPadout>]<[<$Sercom $pad0>]<PIN0>, [<$Sercom $pad1>]<PIN1>, [<$Sercom $pad2>]<PIN2>, [<$Sercom $pad3>]<PIN3>> {
+                            [<$Type HWCSPadout>] { _miso: pads.0, _mosi: pads.1, _sck: pads.2, _cs: pads.3 }
+                        }
+                    }
+
+                    impl<PIN0, PIN1, PIN2, PIN3> DipoDopo for [<$Type HWCSPadout>]<[<$Sercom $pad0>]<PIN0>, [<$Sercom $pad1>]<PIN1>, [<$Sercom $pad2>]<PIN2>, [<$Sercom $pad3>]<PIN3>>
+                    where
+                        PIN0: Map<$Sercom, $pad0>,
+                        PIN1: Map<$Sercom, $pad1>,
+                        PIN2: Map<$Sercom, $pad2>,
+                        PIN3: Map<$Sercom, $pad3>,
+                    {
+                        fn dipo_dopo(&self) -> (u8, u8) {
+                            $dipo_dopo
+                        }
+                    }
+                }
+            };
             ($dipo_dopo:expr => $pad0:ident, $pad1:ident, $pad2:ident) => {
                 $crate::paste::item! {
                     /// Convert from a tuple of (MISO, MOSI, SCK) to SPIMasterXPadout
@@ -89,7 +133,17 @@ macro_rules! spi_master {
         padout!((2, 2) => Pad2, Pad3, Pad1);
         padout!((3, 0) => Pad3, Pad0, Pad1);
 
+        // dipo In master w/ HWCS, DI is MISO Pad 0 or 3
+        // dopo 0 MOSI Pad 0
+        // dopo 2 MOSI Pad 3
+        // SCK can only be on Pad 1
+        // CS can only be on Pad 2
+        // (dipo,dopo) => (MISO, MOSI, SCK, CS)
+        padout!((0, 2) => Pad0, Pad3, Pad1, Pad2);
+        padout!((3, 0) => Pad3, Pad0, Pad1, Pad2);
+
         $crate::paste::item! {
+        // TODO: make this generic on the Padout and enable/disable HW CS based on the Padout type?
             /// SPIMasterX represents the corresponding SERCOMX instance
             /// configured to act in the role of an SPI Master.
             /// Objects of this type implement the HAL `FullDuplex` and blocking
