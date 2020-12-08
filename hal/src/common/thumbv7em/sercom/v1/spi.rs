@@ -7,14 +7,174 @@ use crate::target_device::{MCLK, SERCOM0, SERCOM1, SERCOM2, SERCOM3, SERCOM4, SE
 #[cfg(feature = "min-samd51n")]
 use crate::target_device::{SERCOM6, SERCOM7};
 use crate::time::Hertz;
+use crate::typelevel::*;
+use core::any::Any;
 
 #[derive(Debug)]
 pub enum Error {
     Overrun,
 }
 
-/// The DipoDopo trait defines a way to get the data in and data out pin out
-/// values for a given SPIMasterXPadout configuration. You should not implement
+// The type infrastructure already exists to constrain which Pins can be passed: just use the Map
+// type, and it will automatically enforce correct behavior for the specific target uC.
+// So now we have 2x2 configurations:
+// * Duplex vs. simplex
+// * Manual vs. automatic CS control
+// Each of the 4 possible configurations needs a different set of Pins & Pads.
+// Each of the 4 possible configurations must have a unique type for each SERCOM instance so that
+// type-level functions work as expected.
+//
+// There could possibly be one type which uses the OptionalPad type for storage and enforces Map<>
+// at construction time, i.e.
+
+/*
+pub struct Sercom0SPIMPadout<MISO, MOSI, SCK, CS> {
+    _miso: MISO,
+    _mosi: MOSI,
+    _sck: SCK,
+    _cs: CS,
+}
+
+impl<PIN0, PIN1, PIN2, PIN3> Sercom0SPIMPadout<PIN0, PIN1, PIN2, PIN3>
+    where PIN0: Map<Sercom0, Pad0>,
+          PIN1: Map<Sercom0, Pad3>,
+          PIN2: Map<Sercom0, Pad1>,
+          PIN3: Map<Sercom0, Pad2>
+{
+    fn new(miso: PIN0, mosi: PIN1, sck: PIN2, cs: PIN3) -> Sercom0SPIMPadout<PIN0, PIN1, PIN2, PIN3> {
+        Sercom0SPIMPadout { _miso: miso, _mosi: mosi, _sck: sck, _cs: cs }
+    }
+}
+
+ */
+
+// Duplex without CS
+/*
+impl<MISO, MOSI, SCK> From<Sercom0SPIMPadout<MISO, MOSI, SCK, NoneT>> for SPIMaster0
+    where MISO: AnyPad,
+          MOSI: AnyPad,
+          SCK: AnyPad,
+{
+    fn from(_: Sercom0SPIMPadout<MISO, MOSI, SCK, NoneT>) -> Self {
+        unimplemented!()
+    }
+}
+ */
+
+// Simplex without CS
+/*
+impl<MOSI, SCK> From<Sercom0SPIMPadout<NoneT, MOSI, SCK, NoneT>> for SPIMaster0
+where MOSI: AnyPad,
+SCK: AnyPad,
+{
+    fn from(_: Sercom0SPIMPadout<NoneT, MOSI, SCK, NoneT>) -> Self {
+        unimplemented!()
+    }
+}
+*/
+
+// If this trait owns everything, why not just make it the SPIMaster?
+// Because then we'd have to copy the implementations of traits like FullDuplex and Simplex over
+// and over again inside of a macro. By defining a "config" or builder struct, it can go in the
+// macro and the actual implementations can live in normal structs that are easier to read.
+pub trait SPIMasterPadout {
+    type MISO: SPIMasterRXEN;
+    type MOSI: AnyPad;
+    type SCK: AnyPad;
+    type CS: SPIMasterMSSEN;
+    type Sercom: Sercom;
+
+    // TODO: methods to get register values for dipo, dopo
+    // possibly implemented as other traits (like dipodopo was before)
+    fn spi(&self) -> &SPIM;
+    fn spi_mut(&mut self) -> &SPIM;
+    fn free(self) -> (Self::Sercom, Self::MISO, Self::MOSI, Self::SCK, Self::CS);
+}
+
+// TODO: macro Padout impls using Map<> to constrain valid pins
+
+pub trait SPIMasterRXEN: OptionalPad {
+    fn rxen() -> u8;
+}
+
+impl SPIMasterRXEN for NoneT {
+    fn rxen() -> u8 { 0 }
+}
+
+impl<T: SomePad> SPIMasterRXEN for T {
+    fn rxen() -> u8 { 1 }
+}
+
+pub trait SPIMasterMSSEN: OptionalPad {
+    fn mssen() -> u8;
+}
+
+impl SPIMasterMSSEN for NoneT {
+    fn mssen() -> u8 { 0 }
+}
+
+impl<T: SomePad> SPIMasterMSSEN for T {
+    fn mssen() -> u8 { 1 }
+}
+
+pub struct SPIMasterv2<P: SPIMasterPadout> {
+    padout: P,
+}
+
+impl<P: SPIMasterPadout> SPIMasterv2<P> {
+    fn new<T: Into<P>>(pads: T) -> Self {
+        let pads = pads.into();
+        let _ = P::MISO::rxen();
+        let _ = P::CS::mssen();
+        // TODO: reset and initialize the SPIM block
+        SPIMasterv2 { padout: pads }
+    }
+
+    // convenience
+    fn spi(&self) -> &SPIM { self.padout.spi() }
+    fn spi_mut(&mut self) -> &SPIM { self.padout.spi_mut() }
+}
+
+// Full duplex
+impl<P: SPIMasterPadout> FullDuplex<u8> for SPIMasterv2<P>
+    where P::MISO: SomePad
+{
+    type Error = Error;
+
+    fn read(&mut self) -> nb::Result<u8, Error> {
+        let status = self.spi().status.read();
+        if status.bufovf().bit_is_set() {
+            return Err(nb::Error::Other(Error::Overrun));
+        }
+
+        let intflag = self.spi().intflag.read();
+        // rxc is receive complete
+        if intflag.rxc().bit_is_set() {
+            Ok(self.spi().data.read().data().bits() as u8)
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
+    }
+
+    fn send(&mut self, byte: u8) -> nb::Result<(), Error> {
+        let intflag = self.spi().intflag.read();
+        // dre is data register empty
+        if intflag.dre().bit_is_set() {
+            self.spi_mut().data.write(|w| unsafe { w.data().bits(byte as u32) });
+            Ok(())
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
+    }
+}
+
+// TODO: implement Simplex
+// does not actually have to force NonePad, because we can ignore data that gets read
+// (unless there's a DMA set up, but that's something else entirely, I suppose)
+
+
+/// The SercomSPIPadout trait defines a way to get the data in and data out pin out
+/// values for a given TODO configuration. You should not implement
 /// this trait for yourself; only the implementations in the sercom module make
 /// sense.
 pub trait DipoDopo {

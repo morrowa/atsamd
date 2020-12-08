@@ -381,6 +381,13 @@ impl<P: AnyPad> OptionalPad for P {}
 pub trait SomePad: OptionalPad + AnyPad {}
 impl<P: AnyPad> SomePad for P {}
 
+/// Meta-type representing no [`Pad`].
+///
+/// When used as a bound, this trait allows you to exclude valid [`Pad`]s and
+/// limit the type to [`NoneT`].
+pub trait NonePad: OptionalPad {}
+impl NonePad for NoneT {}
+
 //==============================================================================
 //  Convert between pin and pad
 //==============================================================================
